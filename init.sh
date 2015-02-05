@@ -4,6 +4,9 @@ rm -f LICENSE
 rm -f README.md
 rm -rf .git
 git init
-git add .
+git add build.sbt
+git add project
+git add src
+git commit -m 'Initial Commit'
 rm -f init.sh
 
