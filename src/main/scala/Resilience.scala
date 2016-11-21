@@ -1,6 +1,6 @@
 package com.rtx
 import akka.stream.scaladsl._
-import akka.stream.{ Inlet, Outlet, Shape, Graph }
+import akka.stream.{ Inlet, Outlet, Shape, Graph, GraphStage, FlowShape }
 import scala.collection._
 import akka.NotUsed
 
@@ -37,20 +37,6 @@ case class ResilientShape[In, Out](
   }
 
 }
-val ResilientFlow = Flow() { implicit b =>
-  import FlowGraph.Implicits._
-  
-  // prepare graph elements
-  val broadcast = b.add(Broadcast[Int](2))
-  val zip = b.add(Zip[Int, String]())
-  
-  // connect the graph
-  broadcast.out(0).map(identity) ~> zip.in0
-  broadcast.out(1).map(_.toString) ~> zip.in1
-  
-  // expose ports
-  (broadcast.in, zip.out)
-}
 
 object ResilientShape {
   type Err = Either[Throwable, Error]
@@ -59,7 +45,7 @@ object ResilientShape {
     errSink: Sink[Exception, Any]
   ): Graph[ResilientShape[In, Out], NotUsed] = {
 
-    GraphDSL.create() { implicit b =>
+    Flow.fromGraph(GraphDSL.create() { implicit b =>
       import GraphDSL.Implicits._
 
       val priorityMerge = b.add(Merge[In](1))
@@ -101,11 +87,13 @@ object ResilientShape {
         alternateInput = priorityMerge.in(1),
         resultsOut = nonErrors.out
       )
-    }
+    })
 
   }
 
 }
+
+
 
 object Main extends App {
   val s = Source(1 to 10)
