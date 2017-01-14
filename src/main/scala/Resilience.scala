@@ -1,111 +1,61 @@
 package com.rtx
 import akka.stream.scaladsl._
-import akka.stream.{ Inlet, Outlet, Shape, Graph, GraphStage, FlowShape }
+import akka.stream.{ Inlet, Outlet, Shape, Graph, FlowShape, ActorMaterializer }
 import scala.collection._
 import akka.NotUsed
+import akka.actor.ActorSystem
+import GraphDSL.Implicits._
+import akka.stream.scaladsl.{ GraphDSL, Broadcast, Zip }
+import akka.stream.FlowShape
+import akka.routing._
+import scala.concurrent.Future
 
-case class ResilientShape[In, Out](
-    jobsIn: Inlet[In],
-    alternateInput: Inlet[In],
-    resultsOut: Outlet[Out]
-) extends Shape {
+object Resilience {
 
-  // It is important to provide the list of all input and output
-  // ports with a stable order. Duplicates are not allowed.
-  override val inlets: immutable.Seq[Inlet[_]] =
-    jobsIn :: alternateInput :: Nil
-  override val outlets: immutable.Seq[Outlet[_]] =
-    resultsOut :: Nil
+  implicit val system = ActorSystem()
 
-  // A Shape must be able to create a copy of itself. Basically
-  // it means a new instance with copies of the ports
-  override def deepCopy() = ResilientShape(
-    jobsIn.carbonCopy(),
-    alternateInput.carbonCopy(),
-    resultsOut.carbonCopy()
-  )
+  implicit val mat = ActorMaterializer()
+  implicit val ec = mat.executionContext
 
-  // A Shape must also be able to create itself from existing ports
-  override def copyFromPorts(
-    inlets: immutable.Seq[Inlet[_]],
-    outlets: immutable.Seq[Outlet[_]]
-  ) = {
-    assert(inlets.size == this.inlets.size)
-    assert(outlets.size == this.outlets.size)
-    // This is why order matters when overriding inlets and outlets.
-    ResilientShape[In, Out](inlets(0).as[In], inlets(1).as[In], outlets(0).as[Out])
+  def toFutureLength(s: String): Future[Int] = {
+    Future {throw new Exception("foo")}
   }
+
+  def identity[T](x: T): T = x
+
+  def test = {
+    val errorFlow = Flow[(String, Int)]
+      .recover { case x: Exception => x }.to(Sink.foreach(println _))
+
+    val toHarden = Flow[String].map(toFutureLength _)
+    harden(toHarden).alsoTo(errorFlow)
+      .runWith(Source(List("foobarbaz", "f", "1234567")), Sink.foreach(println _))
+  }
+
+  def harden[A, B](asyncFlow: Flow[A, Future[B], Any]) = Flow.fromGraph(GraphDSL.create() { implicit b =>
+    import GraphDSL.Implicits._
+    // prepare graph elements
+    val broadcast = b.add(Broadcast[A](2))
+    val zip = b.add(Zip[A, Future[B]]())
+
+    // connect the graph
+    broadcast.out(0).map(identity) ~> zip.in0
+    broadcast.out(1).via(asyncFlow) ~> zip.in1
+
+    // expose ports
+    val oot = zip.out.map { x => x._2.map((x._1, _)) }.mapAsyncUnordered(10)(identity _).outlet
+    FlowShape(broadcast.in, oot)
+  })
 
 }
 
-object ResilientShape {
-  type Err = Either[Throwable, Error]
-  def apply[In, Out](
-    weakFlow: Flow[In, Out, Any],
-    errSink: Sink[Exception, Any]
-  ): Graph[ResilientShape[In, Out], NotUsed] = {
 
-    Flow.fromGraph(GraphDSL.create() { implicit b =>
-      import GraphDSL.Implicits._
-
-      val priorityMerge = b.add(Merge[In](1))
-
-      // After merging priority and ordinary jobs, we feed them to the balancer
-
-      val splitFlow = b.add(weakFlow.map(x => Right(x)).recover { case err: Exception => Left(err) })
-      type Railway = Either[Exception, Out]
-
-      val broadcast = b.add(Broadcast[Railway](2))
-
-      val nonErrors = b.add(Flow[Railway].collect {
-                              case Right(x) => x
-                                // you may also handle here Lefts which do exceeded retries count
-                            })
-
-      val errors = b.add(Flow[Railway].collect {
-        case Left(x) => x
-      }
-      )
-
-
-      priorityMerge ~> splitFlow
-      splitFlow ~> broadcast
-      broadcast ~> errors ~> errSink
-      broadcast ~> nonErrors
-      //      priorityMerge ~> splitter ~> successes
-
-      /*
-      splitter ~> bad ~> errStream.in(0)
-      splitter ~> good
-       */
-
-      // We now expose the input ports of the priorityMerge and the output
-      // of the resultsMerge as our PriorityWorkerPool ports
-      // -- all neatly wrapped in our domain specific Shape
-      ResilientShape(
-        jobsIn = priorityMerge.in(0),
-        alternateInput = priorityMerge.in(1),
-        resultsOut = nonErrors.out
-      )
-    })
-
-  }
-
-}
 
 
 
 object Main extends App {
-  val s = Source(1 to 10)
-  val alt = Source(10 to 20)
-
-  val f = Flow[Int].map{x: Int => x * x}
-  val sink = Sink.foreach(println)
-
-  val err = Flow[Exception].map(x => x).to(Sink.ignore)
-
-  val f2 = ResilientShape(f, err) 
-
-  s.via(f2).to(sink).run()
-
+  implicit val system= ActorSystem()
+  implicit val mat= ActorMaterializer()
+  implicit val ec= mat.executionContext
+Resilience.test
 }
